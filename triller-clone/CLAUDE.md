@@ -38,7 +38,7 @@ This is the single most important architectural constraint. Do not reintroduce l
 
 ### Backend (separate, not built yet)
 - Node.js + TypeScript (Express or Fastify)
-- AWS S3 — store raw takes and final outputs
+- AWS S3 — store raw takes and final outputs (undecided)
 - PostgreSQL — users, projects, takes metadata
 - BullMQ + Redis — queue stitching jobs (async, never synchronous)
 
