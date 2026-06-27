@@ -1,8 +1,10 @@
 import { useRef, useState, useEffect } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, Alert } from 'react-native';
 import { CameraView, CameraType } from 'expo-camera';
 import { Audio, InterruptionModeIOS, InterruptionModeAndroid } from 'expo-av';
 import type { AudioConfig, Clip } from '../App';
+
+const MAX_CLIPS = 10;
 
 type Props = {
   audio: AudioConfig | null;
@@ -10,9 +12,10 @@ type Props = {
   onClipRecorded: (videoUri: string) => void;
   onChangeSong: () => void;
   onViewClips: () => void;
+  onStitch: () => void;
 };
 
-export function CameraScreen({ audio, clips, onClipRecorded, onChangeSong, onViewClips }: Props) {
+export function CameraScreen({ audio, clips, onClipRecorded, onChangeSong, onViewClips, onStitch }: Props) {
   const [recording, setRecording] = useState(false);
   const [facing, setFacing] = useState<CameraType>('back');
   const [elapsedMs, setElapsedMs] = useState(0);
@@ -22,7 +25,6 @@ export function CameraScreen({ audio, clips, onClipRecorded, onChangeSong, onVie
 
   const segmentMs = audio ? audio.trimEndMs - audio.trimStartMs : null;
 
-  // Cleanup on unmount
   useEffect(() => {
     return () => {
       timerRef.current && clearInterval(timerRef.current);
@@ -31,9 +33,15 @@ export function CameraScreen({ audio, clips, onClipRecorded, onChangeSong, onVie
   }, []);
 
   const startRecording = async () => {
+    if (clips.length >= MAX_CLIPS) {
+      Alert.alert(
+        'Clip Limit Reached',
+        `Only ${MAX_CLIPS} clips are allowed. Delete some clips to record more.`,
+      );
+      return;
+    }
     if (!cameraRef.current) return;
 
-    // iOS: PlayAndRecord allows music to play while camera records
     await Audio.setAudioModeAsync({
       allowsRecordingIOS: true,
       playsInSilentModeIOS: true,
@@ -41,7 +49,6 @@ export function CameraScreen({ audio, clips, onClipRecorded, onChangeSong, onVie
       interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
     });
 
-    // Play music from trim start
     if (audio?.uri) {
       const { sound } = await Audio.Sound.createAsync(
         { uri: audio.uri },
@@ -54,17 +61,13 @@ export function CameraScreen({ audio, clips, onClipRecorded, onChangeSong, onVie
 
     setElapsedMs(0);
     setRecording(true);
-
-    timerRef.current = setInterval(() => {
-      setElapsedMs((p) => p + 100);
-    }, 100);
+    timerRef.current = setInterval(() => setElapsedMs((p) => p + 100), 100);
 
     const maxDuration = segmentMs ? segmentMs / 1000 : undefined;
 
     try {
       const result = await cameraRef.current.recordAsync({ maxDuration });
       if (result?.uri) {
-        console.log('Recorded:', result.uri);
         onClipRecorded(result.uri);
       }
     } finally {
@@ -80,10 +83,7 @@ export function CameraScreen({ audio, clips, onClipRecorded, onChangeSong, onVie
     }
   };
 
-  const stopRecording = () => {
-    cameraRef.current?.stopRecording();
-  };
-
+  const stopRecording = () => cameraRef.current?.stopRecording();
   const flipCamera = () => setFacing((p) => (p === 'back' ? 'front' : 'back'));
 
   const fmt = (ms: number) => {
@@ -104,28 +104,23 @@ export function CameraScreen({ audio, clips, onClipRecorded, onChangeSong, onVie
         </TouchableOpacity>
 
         <View style={styles.topRight}>
-          {audio && (
-            <TouchableOpacity style={styles.chip} onPress={onChangeSong} disabled={recording}>
-              <Text style={styles.chipText} numberOfLines={1}>🎵 {audio.name}</Text>
-            </TouchableOpacity>
-          )}
-          {!audio && (
-            <TouchableOpacity style={styles.chip} onPress={onChangeSong} disabled={recording}>
-              <Text style={styles.chipText}>+ Add song</Text>
-            </TouchableOpacity>
-          )}
+          <TouchableOpacity style={styles.chip} onPress={onChangeSong} disabled={recording}>
+            <Text style={styles.chipText} numberOfLines={1}>
+              {audio ? `🎵 ${audio.name}` : '+ Add song'}
+            </Text>
+          </TouchableOpacity>
           {clips.length > 0 && (
             <TouchableOpacity style={styles.chip} onPress={onViewClips}>
-              <Text style={styles.chipText}>Clips ({clips.length})</Text>
+              <Text style={styles.chipText}>Clips ({clips.length}/{MAX_CLIPS})</Text>
             </TouchableOpacity>
           )}
         </View>
       </View>
 
-      {/* Progress bar (only when recording with audio) */}
+      {/* Progress bar */}
       {recording && segmentMs && (
-        <View style={styles.progressBarTrack}>
-          <View style={[styles.progressBarFill, { width: `${progressPct * 100}%` }]} />
+        <View style={styles.progressTrack}>
+          <View style={[styles.progressFill, { width: `${progressPct * 100}%` }]} />
         </View>
       )}
 
@@ -136,16 +131,32 @@ export function CameraScreen({ audio, clips, onClipRecorded, onChangeSong, onVie
             {fmt(elapsedMs)}{segmentMs ? ` / ${fmt(segmentMs)}` : ''}
           </Text>
         )}
-        <TouchableOpacity
-          style={[styles.recordRing, recording && styles.recordRingActive]}
-          onPress={recording ? stopRecording : startRecording}
-          activeOpacity={0.8}
-        >
-          <View style={[styles.recordDot, recording && styles.recordDotStop]} />
-        </TouchableOpacity>
+
+        <View style={styles.buttonRow}>
+          {/* Stitch button */}
+          {clips.length > 0 && !recording && (
+            <TouchableOpacity style={styles.stitchButton} onPress={onStitch}>
+              <Text style={styles.stitchIcon}>✂</Text>
+              <Text style={styles.stitchLabel}>Stitch</Text>
+            </TouchableOpacity>
+          )}
+
+          {/* Record button */}
+          <TouchableOpacity
+            style={[styles.recordRing, recording && styles.recordRingActive]}
+            onPress={recording ? stopRecording : startRecording}
+            activeOpacity={0.8}
+          >
+            <View style={[styles.recordDot, recording && styles.recordDotStop]} />
+          </TouchableOpacity>
+
+          {/* Spacer to balance layout when stitch button is visible */}
+          {clips.length > 0 && !recording && <View style={styles.stitchSpacer} />}
+        </View>
+
         {!recording && (
           <Text style={styles.hint}>
-            {segmentMs ? `Max ${fmt(segmentMs)}` : 'Tap to record'}
+            {segmentMs ? `Max ${fmt(segmentMs)} per clip` : 'Tap to record'}
           </Text>
         )}
       </View>
@@ -185,30 +196,33 @@ const styles = StyleSheet.create({
   },
   chipText: { color: '#fff', fontSize: 13, fontWeight: '600' },
 
-  progressBarTrack: {
+  progressTrack: {
     position: 'absolute',
-    bottom: 155,
+    bottom: 160,
     left: 24,
     right: 24,
     height: 3,
     borderRadius: 2,
     backgroundColor: 'rgba(255,255,255,0.25)',
   },
-  progressBarFill: {
-    height: 3,
-    borderRadius: 2,
-    backgroundColor: '#e53e3e',
-  },
+  progressFill: { height: 3, borderRadius: 2, backgroundColor: '#e53e3e' },
 
   bottomControls: {
     position: 'absolute',
-    bottom: 60,
+    bottom: 48,
     width: '100%',
     alignItems: 'center',
-    gap: 12,
+    gap: 14,
   },
   timerText: { color: '#fff', fontSize: 15, fontWeight: '600' },
-  hint: { color: 'rgba(255,255,255,0.7)', fontSize: 13 },
+  hint: { color: 'rgba(255,255,255,0.6)', fontSize: 13 },
+
+  buttonRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 32,
+  },
 
   recordRing: {
     width: 72,
@@ -220,15 +234,21 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   recordRingActive: { borderColor: '#e53e3e' },
-  recordDot: {
-    width: 52,
-    height: 52,
-    borderRadius: 26,
-    backgroundColor: '#e53e3e',
+  recordDot: { width: 52, height: 52, borderRadius: 26, backgroundColor: '#e53e3e' },
+  recordDotStop: { width: 26, height: 26, borderRadius: 5 },
+
+  stitchButton: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: 'rgba(255,255,255,0.15)',
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.5)',
+    gap: 2,
   },
-  recordDotStop: {
-    width: 26,
-    height: 26,
-    borderRadius: 5,
-  },
+  stitchIcon: { fontSize: 20, color: '#fff' },
+  stitchLabel: { fontSize: 10, color: '#fff', fontWeight: '600' },
+  stitchSpacer: { width: 56 },
 });

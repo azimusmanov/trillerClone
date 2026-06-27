@@ -5,6 +5,7 @@ import { PickerScreen } from './screens/PickerScreen';
 import { TrimScreen } from './screens/TrimScreen';
 import { CameraScreen } from './screens/CameraScreen';
 import { ClipsScreen } from './screens/ClipsScreen';
+import { StitchScreen } from './screens/StitchScreen';
 
 export type AudioConfig = {
   uri: string;
@@ -19,7 +20,7 @@ export type Clip = {
   audioConfig: AudioConfig | null;
 };
 
-type AppScreen = 'picker' | 'trim' | 'camera' | 'clips';
+type AppScreen = 'picker' | 'trim' | 'camera' | 'clips' | 'stitch';
 
 export default function App() {
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
@@ -89,6 +90,7 @@ export default function App() {
           }
           onChangeSong={() => setScreen('picker')}
           onViewClips={() => setScreen('clips')}
+          onStitch={() => setScreen('stitch')}
         />
       );
 
@@ -96,6 +98,18 @@ export default function App() {
       return (
         <ClipsScreen
           clips={clips}
+          onDeleteClip={(index) =>
+            setClips((prev) => prev.filter((_, i) => i !== index))
+          }
+          onBack={() => setScreen('camera')}
+        />
+      );
+
+    case 'stitch':
+      return (
+        <StitchScreen
+          clips={clips}
+          audio={audio}
           onBack={() => setScreen('camera')}
         />
       );
