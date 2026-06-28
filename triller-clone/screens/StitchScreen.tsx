@@ -20,8 +20,10 @@ type Phase = 'settings' | 'stitching' | 'preview' | 'error';
 
 type Props = { clips: Clip[]; audio: AudioConfig | null; onBack: () => void };
 
-// Chronological plan: each segment plays from the correct position in the song
-function buildPlan(clipCount: number, totalMs: number, avgMs: number): EditSegment[] {
+// Chronological plan: at song position T, read clip from position T.
+// Sync is handled during recording (audio starts LEAD_IN_MS early so
+// clip frame 0 ≈ trimStartMs). No additional offset needed here.
+function buildPlan(clips: Clip[], totalMs: number, avgMs: number): EditSegment[] {
   const segments: EditSegment[] = [];
   let currentMs = 0;
   while (currentMs < totalMs) {
@@ -30,8 +32,8 @@ function buildPlan(clipCount: number, totalMs: number, avgMs: number): EditSegme
     const hi  = avgMs * 1.4;
     const dur = Math.min(lo + Math.random() * (hi - lo), remaining);
     segments.push({
-      clipIndex: Math.floor(Math.random() * clipCount),
-      startMs:   Math.round(currentMs),   // chronological position in the song
+      clipIndex:  Math.floor(Math.random() * clips.length),
+      startMs:    Math.round(currentMs),
       durationMs: Math.round(dur),
     });
     currentMs += dur;
@@ -66,7 +68,7 @@ export function StitchScreen({ clips, audio, onBack }: Props) {
     setOutputUri(null);
     setIsPlaying(false);
     try {
-      const plan = buildPlan(clips.length, totalMs, avgSeconds * 1000);
+      const plan = buildPlan(clips, totalMs, avgSeconds * 1000);
       const uri  = await stitchVideos(
         plan.map(seg => ({ uri: clips[seg.clipIndex].videoUri, startMs: seg.startMs, durationMs: seg.durationMs })),
         audio?.uri ?? null,

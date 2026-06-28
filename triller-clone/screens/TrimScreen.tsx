@@ -10,13 +10,15 @@ type Props = {
   onBack: () => void;
 };
 
-const TRACK_H  = 72;
-const HANDLE_W = 24;
-const BARS     = 52;
+const TRACK_H  = 64;
+const HANDLE_W = 20;   // visual width
+const HIT_W    = 44;   // touch target width
+const BARS     = 50;
 const MIN_SEG  = 1_000;
 
+// Stable pseudo-waveform
 const WAVEFORM = Array.from({ length: BARS }, (_, i) =>
-  Math.max(0.08, Math.min(1, Math.sin(i * 0.38) * 0.28 + 0.52 + Math.sin(i * 1.9) * 0.22)),
+  Math.max(0.06, Math.min(1, Math.abs(Math.sin(i * 0.41)) * 0.55 + Math.abs(Math.sin(i * 1.7)) * 0.4 + 0.08)),
 );
 
 function fmt(ms: number) {
@@ -34,10 +36,10 @@ export function TrimScreen({ audio, onConfirm, onBack }: Props) {
   const tsRef  = useRef(0);
   const teRef  = useRef(durationMs);
   const twRef  = useRef(0);
-  const sDragBase = useRef(0);
-  const eDragBase = useRef(0);
-  const soundRef  = useRef<Audio.Sound | null>(null);
-  const timerRef  = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sBase  = useRef(0);
+  const eBase  = useRef(0);
+  const soundRef = useRef<Audio.Sound | null>(null);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   tsRef.current = trimStart;
   teRef.current = trimEnd;
@@ -47,16 +49,26 @@ export function TrimScreen({ audio, onConfirm, onBack }: Props) {
     soundRef.current?.unloadAsync();
   }, []);
 
+  const stopPreview = () => {
+    timerRef.current && clearTimeout(timerRef.current);
+    timerRef.current = null;
+    soundRef.current?.stopAsync().catch(() => {});
+    soundRef.current?.unloadAsync().catch(() => {});
+    soundRef.current = null;
+    setPreviewing(false);
+  };
+
   const startPan = useRef(PanResponder.create({
     onStartShouldSetPanResponder: () => true,
     onMoveShouldSetPanResponder:  () => true,
     onPanResponderGrant: () => {
-      sDragBase.current = (tsRef.current / durationMs) * twRef.current;
+      stopPreview(); // stop audio when user grabs a handle
+      sBase.current = (tsRef.current / durationMs) * twRef.current;
     },
     onPanResponderMove: (_, g) => {
       const tw   = twRef.current;
       const maxX = (teRef.current / durationMs) * tw - (MIN_SEG / durationMs) * tw;
-      const newX = Math.max(0, Math.min(sDragBase.current + g.dx, maxX));
+      const newX = Math.max(0, Math.min(sBase.current + g.dx, maxX));
       tsRef.current = (newX / tw) * durationMs;
       setTrimStart(tsRef.current);
     },
@@ -66,33 +78,22 @@ export function TrimScreen({ audio, onConfirm, onBack }: Props) {
     onStartShouldSetPanResponder: () => true,
     onMoveShouldSetPanResponder:  () => true,
     onPanResponderGrant: () => {
-      eDragBase.current = (teRef.current / durationMs) * twRef.current;
+      stopPreview();
+      eBase.current = (teRef.current / durationMs) * twRef.current;
     },
     onPanResponderMove: (_, g) => {
       const tw   = twRef.current;
       const minX = (tsRef.current / durationMs) * tw + (MIN_SEG / durationMs) * tw;
-      const newX = Math.max(minX, Math.min(eDragBase.current + g.dx, tw));
+      const newX = Math.max(minX, Math.min(eBase.current + g.dx, tw));
       teRef.current = (newX / tw) * durationMs;
       setTrimEnd(teRef.current);
     },
   })).current;
 
-  const stopPreview = async () => {
-    timerRef.current && clearTimeout(timerRef.current);
-    timerRef.current = null;
-    if (soundRef.current) {
-      await soundRef.current.stopAsync().catch(() => {});
-      await soundRef.current.unloadAsync().catch(() => {});
-      soundRef.current = null;
-    }
-    setPreviewing(false);
-  };
-
   const togglePreview = async () => {
-    if (previewing) { await stopPreview(); return; }
+    if (previewing) { stopPreview(); return; }
     await Audio.setAudioModeAsync({
-      allowsRecordingIOS: false,
-      playsInSilentModeIOS: true,
+      allowsRecordingIOS: false, playsInSilentModeIOS: true,
       interruptionModeIOS: InterruptionModeIOS.DuckOthers,
       interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
     });
@@ -104,13 +105,17 @@ export function TrimScreen({ audio, onConfirm, onBack }: Props) {
     timerRef.current = setTimeout(stopPreview, teRef.current - tsRef.current);
   };
 
-  const sPct   = trackWidth > 0 ? trimStart / durationMs : 0;
-  const ePct   = trackWidth > 0 ? trimEnd   / durationMs : 1;
-  const segMs  = trimEnd - trimStart;
+  const sPct  = trackWidth > 0 ? trimStart / durationMs : 0;
+  const ePct  = trackWidth > 0 ? trimEnd   / durationMs : 1;
+  const segMs = trimEnd - trimStart;
 
-  // Center each handle on its position
-  const sHandleX = Math.max(0, sPct * trackWidth - HANDLE_W / 2);
-  const eHandleX = Math.min(trackWidth - HANDLE_W, ePct * trackWidth - HANDLE_W / 2);
+  // Center handles on their positions, clamped to track bounds
+  const sX = Math.max(0, sPct * trackWidth - HANDLE_W / 2);
+  const eX = Math.min(trackWidth - HANDLE_W, ePct * trackWidth - HANDLE_W / 2);
+
+  // Hit areas centered on handles (wider for easy grabbing)
+  const sHitX = Math.max(0, sPct * trackWidth - HIT_W / 2);
+  const eHitX = Math.min(trackWidth - HIT_W, ePct * trackWidth - HIT_W / 2);
 
   return (
     <SafeAreaView style={s.screen}>
@@ -126,7 +131,7 @@ export function TrimScreen({ audio, onConfirm, onBack }: Props) {
         <Text style={s.songName} numberOfLines={2}>{audio.name}</Text>
         <Text style={s.totalDur}>Total: {fmt(durationMs)}</Text>
 
-        {/* Waveform */}
+        {/* Waveform track */}
         <View
           style={s.waveOuter}
           onLayout={e => {
@@ -136,50 +141,71 @@ export function TrimScreen({ audio, onConfirm, onBack }: Props) {
           }}
         >
           {/* Bars */}
-          <View style={s.barsRow}>
+          <View style={s.barsRow} pointerEvents="none">
             {WAVEFORM.map((h, i) => {
-              const barS = (i / BARS) * durationMs;
-              const barE = ((i + 1) / BARS) * durationMs;
-              const inside = barS >= trimStart && barE <= trimEnd;
+              const bS = (i / BARS) * durationMs;
+              const bE = ((i + 1) / BARS) * durationMs;
+              const inside = bS >= trimStart && bE <= trimEnd;
               return (
                 <View
                   key={i}
-                  style={[s.bar, { height: `${Math.round(h * 100)}%` },
-                    inside ? s.barIn : s.barOut]}
+                  style={[s.bar, { height: `${Math.round(h * 100)}%` }, inside ? s.barIn : s.barOut]}
                 />
               );
             })}
           </View>
 
-          {/* Dim overlays */}
+          {/* Dim overlays outside selection */}
           {trackWidth > 0 && <>
-            <View style={[s.dim, { left: 0, width: sPct * trackWidth }]} />
-            <View style={[s.dim, { left: ePct * trackWidth, right: 0 }]} />
+            <View style={[s.dim, { left: 0, width: sPct * trackWidth }]} pointerEvents="none" />
+            <View style={[s.dim, { left: ePct * trackWidth, right: 0 }]} pointerEvents="none" />
           </>}
 
-          {/* Handles */}
-          {trackWidth > 0 && <>
-            <View style={[s.handle, { left: sHandleX }]} {...startPan.panHandlers}>
-              <View style={s.handleLine} />
-              <View style={[s.knob, { top: -7 }]} />
-              <View style={[s.knob, { bottom: -7 }]} />
+          {/* START handle — accent/purple, left bracket */}
+          {trackWidth > 0 && (
+            <View
+              style={[s.hitArea, { left: sHitX }]}
+              {...startPan.panHandlers}
+            >
+              <View style={[s.handleBar, s.handleBarStart, { left: HANDLE_W / 2 - 1 }]} />
+              <View style={[s.handleCap, s.handleCapTop, s.handleCapStart, { left: HANDLE_W / 2 - 8 }]} />
+              <View style={[s.handleCap, s.handleCapBot, s.handleCapStart, { left: HANDLE_W / 2 - 8 }]} />
             </View>
-            <View style={[s.handle, { left: eHandleX }]} {...endPan.panHandlers}>
-              <View style={s.handleLine} />
-              <View style={[s.knob, { top: -7 }]} />
-              <View style={[s.knob, { bottom: -7 }]} />
+          )}
+
+          {/* END handle — white, right bracket */}
+          {trackWidth > 0 && (
+            <View
+              style={[s.hitArea, { left: eHitX }]}
+              {...endPan.panHandlers}
+            >
+              <View style={[s.handleBar, s.handleBarEnd, { left: HANDLE_W / 2 - 1 }]} />
+              <View style={[s.handleCap, s.handleCapTop, s.handleCapEnd, { left: HANDLE_W / 2 - 8 }]} />
+              <View style={[s.handleCap, s.handleCapBot, s.handleCapEnd, { left: HANDLE_W / 2 - 8 }]} />
             </View>
-          </>}
+          )}
+        </View>
+
+        {/* Handle legend */}
+        <View style={s.legend}>
+          <View style={s.legendItem}>
+            <View style={[s.legendDot, { backgroundColor: c.accent }]} />
+            <Text style={s.legendText}>Start</Text>
+          </View>
+          <View style={s.legendItem}>
+            <View style={[s.legendDot, { backgroundColor: c.text }]} />
+            <Text style={s.legendText}>End</Text>
+          </View>
         </View>
 
         {/* Times */}
         <View style={s.timeRow}>
           <View>
-            <Text style={s.timeVal}>{fmt(trimStart)}</Text>
+            <Text style={[s.timeVal, { color: c.accentGlow }]}>{fmt(trimStart)}</Text>
             <Text style={s.timeLabel}>start</Text>
           </View>
           <View style={{ alignItems: 'center' }}>
-            <Text style={[s.timeVal, { color: c.accentGlow }]}>{fmt(segMs)}</Text>
+            <Text style={s.timeVal}>{fmt(segMs)}</Text>
             <Text style={s.timeLabel}>selected</Text>
           </View>
           <View style={{ alignItems: 'flex-end' }}>
@@ -188,7 +214,7 @@ export function TrimScreen({ audio, onConfirm, onBack }: Props) {
           </View>
         </View>
 
-        {/* Buttons row */}
+        {/* Buttons */}
         <View style={s.btnRow}>
           <TouchableOpacity
             style={[s.actionBtn, previewing && s.actionBtnActive]}
@@ -198,7 +224,6 @@ export function TrimScreen({ audio, onConfirm, onBack }: Props) {
               {previewing ? '⏹  Stop' : '▶  Preview'}
             </Text>
           </TouchableOpacity>
-
           <TouchableOpacity
             style={s.actionBtn}
             onPress={() => Alert.alert('Not Implemented', 'Auto-trim coming soon!')}
@@ -227,37 +252,48 @@ const s = StyleSheet.create({
   },
   back: { color: c.textMuted, fontSize: 15, width: 60 },
   headerTitle: { color: c.text, fontSize: 17, fontWeight: '700' },
-  body: { flex: 1, paddingHorizontal: 20, paddingTop: 24, gap: 22 },
+  body: { flex: 1, paddingHorizontal: 20, paddingTop: 24, gap: 20 },
   songName: { color: c.text, fontSize: 16, fontWeight: '600', lineHeight: 22 },
-  totalDur:  { color: c.textDim, fontSize: 13, marginTop: -14 },
+  totalDur:  { color: c.textDim, fontSize: 13, marginTop: -12 },
 
-  waveOuter: { height: TRACK_H, position: 'relative', overflow: 'visible' },
+  waveOuter: { height: TRACK_H, position: 'relative', overflow: 'visible', marginVertical: 4 },
   barsRow: {
     flexDirection: 'row', alignItems: 'center', height: TRACK_H,
-    gap: 2, borderRadius: 8, overflow: 'hidden',
+    borderRadius: 8, overflow: 'hidden',
+    backgroundColor: c.surface,
   },
-  bar: { flex: 1, borderRadius: 2, minHeight: 3 },
+  bar:    { flex: 1, borderRadius: 1, minHeight: 2, marginHorizontal: 1 },
   barIn:  { backgroundColor: c.accent },
   barOut: { backgroundColor: c.surface2 },
-  dim: {
-    position: 'absolute', top: 0, bottom: 0,
-    backgroundColor: 'rgba(8,6,18,0.6)', borderRadius: 8,
-  },
-  handle: {
-    position: 'absolute', top: -8, bottom: -8,
-    width: HANDLE_W, alignItems: 'center', justifyContent: 'center', zIndex: 10,
-  },
-  handleLine: {
-    width: 2, height: TRACK_H + 16, backgroundColor: c.text, borderRadius: 2,
-    ...glow(c.text, 6),
-  },
-  knob: {
-    position: 'absolute', width: 12, height: 12, borderRadius: 6,
-    backgroundColor: c.text, ...glow(c.text, 8),
-  },
+  dim:    { position: 'absolute', top: 0, bottom: 0, backgroundColor: 'rgba(8,6,18,0.65)', borderRadius: 8 },
 
-  timeRow: { flexDirection: 'row', justifyContent: 'space-between' },
-  timeVal:   { color: c.text, fontSize: 16, fontWeight: '700' },
+  // Hit area — wide, transparent, centered on handle position
+  hitArea: {
+    position: 'absolute', top: -8, bottom: -8,
+    width: HIT_W, zIndex: 20,
+  },
+  // Visual bar inside hit area
+  handleBar: {
+    position: 'absolute', top: 0, bottom: 0, width: 3, borderRadius: 2,
+  },
+  handleBarStart: { backgroundColor: c.accent, ...glow(c.accent, 8) },
+  handleBarEnd:   { backgroundColor: c.text,   ...glow(c.text, 6) },
+  // Top and bottom caps (circles)
+  handleCap: {
+    position: 'absolute', width: 14, height: 14, borderRadius: 7,
+  },
+  handleCapTop: { top: -8 },
+  handleCapBot: { bottom: -8 },
+  handleCapStart: { backgroundColor: c.accent, ...glow(c.accent, 8) },
+  handleCapEnd:   { backgroundColor: c.text },
+
+  legend: { flexDirection: 'row', gap: 16, marginTop: -8 },
+  legendItem: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  legendDot: { width: 8, height: 8, borderRadius: 4 },
+  legendText: { color: c.textDim, fontSize: 11 },
+
+  timeRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: -4 },
+  timeVal:   { color: c.text, fontSize: 17, fontWeight: '700' },
   timeLabel: { color: c.textDim, fontSize: 10, textTransform: 'uppercase', marginTop: 2 },
 
   btnRow: { flexDirection: 'row', gap: 12 },
@@ -270,8 +306,8 @@ const s = StyleSheet.create({
   actionBtnTextActive: { color: c.bg },
 
   confirmBtn: {
-    backgroundColor: c.accent, paddingVertical: 16,
-    borderRadius: 50, alignItems: 'center', ...glow(c.accent, 16),
+    backgroundColor: c.accent, paddingVertical: 16, borderRadius: 50,
+    alignItems: 'center', ...glow(c.accent, 16),
   },
   confirmBtnText: { color: '#fff', fontSize: 16, fontWeight: '700' },
 });

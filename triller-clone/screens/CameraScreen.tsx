@@ -6,6 +6,12 @@ import { c, glow } from '../theme';
 import type { AudioConfig, Clip } from '../App';
 
 const MAX_CLIPS = 10;
+// Audio starts this many ms before trimStart so the camera encoder is running
+// by the time audio reaches the selected segment.
+// Tune this if still desynced: increase if video still lags, decrease if audio lags.
+// Audio starts this many ms before trimStart.
+// Must equal camera encoder startup time on your device (~300ms on most iPhones in preview mode).
+const LEAD_IN_MS = 300;
 
 type Props = {
   audio: AudioConfig | null;
@@ -45,10 +51,13 @@ export function CameraScreen({ audio, clips, onClipRecorded, onChangeSong, onVie
       interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
     });
 
+    // Start audio LEAD_IN_MS before trimStart so by the time the camera encoder
+    // finishes starting up (~150ms), audio has reached trimStartMs.
+    // No compensation needed in playback or stitch — this is the only adjustment.
     if (audio?.uri) {
       const { sound } = await Audio.Sound.createAsync({ uri: audio.uri }, { shouldPlay: false });
-      await sound.setPositionAsync(audio.trimStartMs);
-      await sound.playAsync();
+      const leadInStart = Math.max(0, audio.trimStartMs - LEAD_IN_MS);
+      await sound.setPositionAsync(leadInStart);
       soundRef.current = sound;
     }
 
@@ -57,9 +66,13 @@ export function CameraScreen({ audio, clips, onClipRecorded, onChangeSong, onVie
     timerRef.current = setInterval(() => setElapsedMs(p => p + 100), 100);
 
     try {
-      const result = await cameraRef.current.recordAsync({
+      const recordingPromise = cameraRef.current.recordAsync({
         maxDuration: segmentMs ? segmentMs / 1000 : undefined,
       });
+      // Fire audio simultaneously — it starts LEAD_IN_MS before trimStart
+      await soundRef.current?.playAsync();
+
+      const result = await recordingPromise;
       if (result?.uri) onClipRecorded(result.uri);
     } finally {
       timerRef.current && clearInterval(timerRef.current);
