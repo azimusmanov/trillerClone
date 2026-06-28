@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Alert, SafeAreaView, ActivityIndicator } from 'react-native';
 import * as DocumentPicker from 'expo-document-picker';
 import { Audio, AVPlaybackStatusSuccess } from 'expo-av';
+import { c, glow } from '../theme';
 
 type Props = {
   onPicked: (uri: string, name: string, durationMs: number) => void;
@@ -20,48 +21,39 @@ export function PickerScreen({ onPicked, onSkip, hasClips, onViewClips }: Props)
         type: 'audio/*',
         copyToCacheDirectory: true,
       });
-
       if (result.canceled || !result.assets?.length) return;
-
       const asset = result.assets[0];
-
-      const { sound, status } = await Audio.Sound.createAsync(
-        { uri: asset.uri },
-        { shouldPlay: false },
-      );
+      const { sound, status } = await Audio.Sound.createAsync({ uri: asset.uri }, { shouldPlay: false });
       const durationMs = (status as AVPlaybackStatusSuccess).durationMillis ?? 30_000;
       await sound.unloadAsync();
-
       onPicked(asset.uri, asset.name ?? 'Track', durationMs);
     } catch {
-      Alert.alert('Error', 'Could not load that audio file. Make sure it\'s a valid MP3.');
+      Alert.alert('Error', 'Could not load that audio file.');
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <SafeAreaView style={styles.container}>
-      <View style={styles.body}>
-        <Text style={styles.emoji}>🎵</Text>
-        <Text style={styles.title}>Pick a Song</Text>
-        <Text style={styles.subtitle}>Choose an MP3 to record to</Text>
+    <SafeAreaView style={s.screen}>
+      <View style={s.body}>
+        <Text style={s.glyph}>✦</Text>
+        <Text style={s.title}>Pick a Song</Text>
+        <Text style={s.sub}>Choose an MP3 to record to</Text>
 
-        <TouchableOpacity style={styles.primaryButton} onPress={pickAudio} disabled={loading}>
-          {loading ? (
-            <ActivityIndicator color="#000" />
-          ) : (
-            <Text style={styles.primaryButtonText}>Browse MP3</Text>
-          )}
+        <TouchableOpacity style={s.primaryBtn} onPress={pickAudio} disabled={loading}>
+          {loading
+            ? <ActivityIndicator color={c.bg} />
+            : <Text style={s.primaryBtnText}>Browse MP3</Text>}
         </TouchableOpacity>
 
-        <TouchableOpacity style={styles.ghostButton} onPress={onSkip}>
-          <Text style={styles.ghostText}>Skip — no music</Text>
+        <TouchableOpacity onPress={onSkip}>
+          <Text style={s.ghost}>Skip — no music</Text>
         </TouchableOpacity>
 
         {hasClips && (
-          <TouchableOpacity style={styles.ghostButton} onPress={onViewClips}>
-            <Text style={styles.ghostText}>View recorded clips</Text>
+          <TouchableOpacity onPress={onViewClips}>
+            <Text style={s.ghost}>View recorded clips</Text>
           </TouchableOpacity>
         )}
       </View>
@@ -69,21 +61,18 @@ export function PickerScreen({ onPicked, onSkip, hasClips, onViewClips }: Props)
   );
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#111' },
-  body: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 16, paddingHorizontal: 32 },
-  emoji: { fontSize: 56 },
-  title: { color: '#fff', fontSize: 28, fontWeight: '800' },
-  subtitle: { color: '#aaa', fontSize: 15, marginBottom: 8 },
-  primaryButton: {
-    backgroundColor: '#fff',
-    paddingHorizontal: 40,
-    paddingVertical: 16,
-    borderRadius: 50,
-    minWidth: 180,
-    alignItems: 'center',
+const s = StyleSheet.create({
+  screen: { flex: 1, backgroundColor: c.bg },
+  body: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 18, paddingHorizontal: 32 },
+  glyph: { fontSize: 52, color: c.accentGlow, ...glow(c.accentGlow, 24) },
+  title: { color: c.text, fontSize: 30, fontWeight: '800', letterSpacing: -0.5 },
+  sub: { color: c.textMuted, fontSize: 15, marginTop: -8 },
+  primaryBtn: {
+    backgroundColor: c.accent,
+    paddingHorizontal: 44, paddingVertical: 16,
+    borderRadius: 50, minWidth: 180, alignItems: 'center',
+    ...glow(c.accent, 20),
   },
-  primaryButtonText: { fontSize: 17, fontWeight: '700', color: '#000' },
-  ghostButton: { paddingVertical: 10 },
-  ghostText: { color: '#888', fontSize: 15 },
+  primaryBtnText: { color: '#fff', fontSize: 17, fontWeight: '700' },
+  ghost: { color: c.textMuted, fontSize: 14, paddingVertical: 6 },
 });

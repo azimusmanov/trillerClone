@@ -1,13 +1,7 @@
-import { useRef, useState } from 'react';
-import {
-  View,
-  Text,
-  TouchableOpacity,
-  StyleSheet,
-  Alert,
-  SafeAreaView,
-  PanResponder,
-} from 'react-native';
+import { useRef, useState, useEffect } from 'react';
+import { View, Text, TouchableOpacity, StyleSheet, Alert, SafeAreaView, PanResponder } from 'react-native';
+import { Audio, InterruptionModeIOS, InterruptionModeAndroid } from 'expo-av';
+import { c, glow } from '../theme';
 import type { AudioConfig } from '../App';
 
 type Props = {
@@ -16,9 +10,14 @@ type Props = {
   onBack: () => void;
 };
 
-const HANDLE_W = 22;
-const TRACK_H = 56;
-const MIN_SEG_MS = 1_000;
+const TRACK_H  = 72;
+const HANDLE_W = 24;
+const BARS     = 52;
+const MIN_SEG  = 1_000;
+
+const WAVEFORM = Array.from({ length: BARS }, (_, i) =>
+  Math.max(0.08, Math.min(1, Math.sin(i * 0.38) * 0.28 + 0.52 + Math.sin(i * 1.9) * 0.22)),
+);
 
 function fmt(ms: number) {
   const s = Math.floor(ms / 1000);
@@ -27,238 +26,252 @@ function fmt(ms: number) {
 
 export function TrimScreen({ audio, onConfirm, onBack }: Props) {
   const { durationMs } = audio;
-
   const [trimStart, setTrimStart] = useState(0);
-  const [trimEnd, setTrimEnd] = useState(durationMs);
+  const [trimEnd,   setTrimEnd]   = useState(durationMs);
   const [trackWidth, setTrackWidth] = useState(0);
+  const [previewing, setPreviewing] = useState(false);
 
-  // Refs so PanResponder closures always read current values
-  const trimStartRef = useRef(0);
-  const trimEndRef = useRef(durationMs);
-  const trackWidthRef = useRef(0);
-  const startDragBase = useRef(0);
-  const endDragBase = useRef(0);
+  const tsRef  = useRef(0);
+  const teRef  = useRef(durationMs);
+  const twRef  = useRef(0);
+  const sDragBase = useRef(0);
+  const eDragBase = useRef(0);
+  const soundRef  = useRef<Audio.Sound | null>(null);
+  const timerRef  = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  trimStartRef.current = trimStart;
-  trimEndRef.current = trimEnd;
+  tsRef.current = trimStart;
+  teRef.current = trimEnd;
 
-  const startPan = useRef(
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: () => true,
-      onPanResponderGrant: () => {
-        startDragBase.current =
-          (trimStartRef.current / durationMs) * trackWidthRef.current;
-      },
-      onPanResponderMove: (_, g) => {
-        const tw = trackWidthRef.current;
-        const maxX =
-          (trimEndRef.current / durationMs) * tw -
-          (MIN_SEG_MS / durationMs) * tw;
-        const newX = Math.max(0, Math.min(startDragBase.current + g.dx, maxX));
-        const newMs = (newX / tw) * durationMs;
-        trimStartRef.current = newMs;
-        setTrimStart(newMs);
-      },
-    }),
-  ).current;
+  useEffect(() => () => {
+    timerRef.current && clearTimeout(timerRef.current);
+    soundRef.current?.unloadAsync();
+  }, []);
 
-  const endPan = useRef(
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: () => true,
-      onPanResponderGrant: () => {
-        endDragBase.current =
-          (trimEndRef.current / durationMs) * trackWidthRef.current;
-      },
-      onPanResponderMove: (_, g) => {
-        const tw = trackWidthRef.current;
-        const minX =
-          (trimStartRef.current / durationMs) * tw +
-          (MIN_SEG_MS / durationMs) * tw;
-        const newX = Math.max(minX, Math.min(endDragBase.current + g.dx, tw));
-        const newMs = (newX / tw) * durationMs;
-        trimEndRef.current = newMs;
-        setTrimEnd(newMs);
-      },
-    }),
-  ).current;
+  const startPan = useRef(PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onMoveShouldSetPanResponder:  () => true,
+    onPanResponderGrant: () => {
+      sDragBase.current = (tsRef.current / durationMs) * twRef.current;
+    },
+    onPanResponderMove: (_, g) => {
+      const tw   = twRef.current;
+      const maxX = (teRef.current / durationMs) * tw - (MIN_SEG / durationMs) * tw;
+      const newX = Math.max(0, Math.min(sDragBase.current + g.dx, maxX));
+      tsRef.current = (newX / tw) * durationMs;
+      setTrimStart(tsRef.current);
+    },
+  })).current;
 
-  const segDuration = trimEnd - trimStart;
-  const startPct = trackWidth > 0 ? trimStart / durationMs : 0;
-  const endPct = trackWidth > 0 ? trimEnd / durationMs : 0;
+  const endPan = useRef(PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onMoveShouldSetPanResponder:  () => true,
+    onPanResponderGrant: () => {
+      eDragBase.current = (teRef.current / durationMs) * twRef.current;
+    },
+    onPanResponderMove: (_, g) => {
+      const tw   = twRef.current;
+      const minX = (tsRef.current / durationMs) * tw + (MIN_SEG / durationMs) * tw;
+      const newX = Math.max(minX, Math.min(eDragBase.current + g.dx, tw));
+      teRef.current = (newX / tw) * durationMs;
+      setTrimEnd(teRef.current);
+    },
+  })).current;
+
+  const stopPreview = async () => {
+    timerRef.current && clearTimeout(timerRef.current);
+    timerRef.current = null;
+    if (soundRef.current) {
+      await soundRef.current.stopAsync().catch(() => {});
+      await soundRef.current.unloadAsync().catch(() => {});
+      soundRef.current = null;
+    }
+    setPreviewing(false);
+  };
+
+  const togglePreview = async () => {
+    if (previewing) { await stopPreview(); return; }
+    await Audio.setAudioModeAsync({
+      allowsRecordingIOS: false,
+      playsInSilentModeIOS: true,
+      interruptionModeIOS: InterruptionModeIOS.DuckOthers,
+      interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
+    });
+    const { sound } = await Audio.Sound.createAsync({ uri: audio.uri }, { shouldPlay: false });
+    soundRef.current = sound;
+    await sound.setPositionAsync(tsRef.current);
+    await sound.playAsync();
+    setPreviewing(true);
+    timerRef.current = setTimeout(stopPreview, teRef.current - tsRef.current);
+  };
+
+  const sPct   = trackWidth > 0 ? trimStart / durationMs : 0;
+  const ePct   = trackWidth > 0 ? trimEnd   / durationMs : 1;
+  const segMs  = trimEnd - trimStart;
+
+  // Center each handle on its position
+  const sHandleX = Math.max(0, sPct * trackWidth - HANDLE_W / 2);
+  const eHandleX = Math.min(trackWidth - HANDLE_W, ePct * trackWidth - HANDLE_W / 2);
 
   return (
-    <SafeAreaView style={styles.container}>
-      {/* Header */}
-      <View style={styles.header}>
+    <SafeAreaView style={s.screen}>
+      <View style={s.header}>
         <TouchableOpacity onPress={onBack} hitSlop={16}>
-          <Text style={styles.backText}>← Back</Text>
+          <Text style={s.back}>← Back</Text>
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>Trim</Text>
+        <Text style={s.headerTitle}>Trim</Text>
         <View style={{ width: 60 }} />
       </View>
 
-      <View style={styles.body}>
-        <Text style={styles.songName} numberOfLines={1}>{audio.name}</Text>
-        <Text style={styles.totalDuration}>Total: {fmt(durationMs)}</Text>
+      <View style={s.body}>
+        <Text style={s.songName} numberOfLines={2}>{audio.name}</Text>
+        <Text style={s.totalDur}>Total: {fmt(durationMs)}</Text>
 
-        {/* Time labels */}
-        <View style={styles.timeRow}>
-          <Text style={styles.timeLabel}>{fmt(trimStart)}</Text>
-          <Text style={styles.segmentDuration}>{fmt(segDuration)} selected</Text>
-          <Text style={styles.timeLabel}>{fmt(trimEnd)}</Text>
-        </View>
-
-        {/* Track */}
+        {/* Waveform */}
         <View
-          style={styles.trackContainer}
-          onLayout={(e) => {
+          style={s.waveOuter}
+          onLayout={e => {
             const w = e.nativeEvent.layout.width;
-            trackWidthRef.current = w;
+            twRef.current = w;
             setTrackWidth(w);
           }}
         >
-          {/* Gray background strip */}
-          <View style={styles.strip} />
+          {/* Bars */}
+          <View style={s.barsRow}>
+            {WAVEFORM.map((h, i) => {
+              const barS = (i / BARS) * durationMs;
+              const barE = ((i + 1) / BARS) * durationMs;
+              const inside = barS >= trimStart && barE <= trimEnd;
+              return (
+                <View
+                  key={i}
+                  style={[s.bar, { height: `${Math.round(h * 100)}%` },
+                    inside ? s.barIn : s.barOut]}
+                />
+              );
+            })}
+          </View>
 
-          {trackWidth > 0 && (
-            <>
-              {/* Highlighted selected region */}
-              <View
-                style={[
-                  styles.selectedRegion,
-                  {
-                    left: startPct * trackWidth,
-                    width: (endPct - startPct) * trackWidth,
-                  },
-                ]}
-              />
+          {/* Dim overlays */}
+          {trackWidth > 0 && <>
+            <View style={[s.dim, { left: 0, width: sPct * trackWidth }]} />
+            <View style={[s.dim, { left: ePct * trackWidth, right: 0 }]} />
+          </>}
 
-              {/* Start handle */}
-              <View
-                style={[styles.handle, { left: startPct * trackWidth }]}
-                {...startPan.panHandlers}
-              >
-                <View style={styles.handleBar} />
-              </View>
-
-              {/* End handle */}
-              <View
-                style={[styles.handle, { left: endPct * trackWidth - HANDLE_W }]}
-                {...endPan.panHandlers}
-              >
-                <View style={styles.handleBar} />
-              </View>
-            </>
-          )}
+          {/* Handles */}
+          {trackWidth > 0 && <>
+            <View style={[s.handle, { left: sHandleX }]} {...startPan.panHandlers}>
+              <View style={s.handleLine} />
+              <View style={[s.knob, { top: -7 }]} />
+              <View style={[s.knob, { bottom: -7 }]} />
+            </View>
+            <View style={[s.handle, { left: eHandleX }]} {...endPan.panHandlers}>
+              <View style={s.handleLine} />
+              <View style={[s.knob, { top: -7 }]} />
+              <View style={[s.knob, { bottom: -7 }]} />
+            </View>
+          </>}
         </View>
 
-        {/* Auto-trim button */}
-        <TouchableOpacity
-          style={styles.autoTrimButton}
-          onPress={() =>
-            Alert.alert(
-              'Not Implemented',
-              'Auto-trim will detect the best segment automatically. Coming soon!',
-              [{ text: 'OK' }],
-            )
-          }
-        >
-          <Text style={styles.autoTrimText}>✨ Auto-trim</Text>
-        </TouchableOpacity>
+        {/* Times */}
+        <View style={s.timeRow}>
+          <View>
+            <Text style={s.timeVal}>{fmt(trimStart)}</Text>
+            <Text style={s.timeLabel}>start</Text>
+          </View>
+          <View style={{ alignItems: 'center' }}>
+            <Text style={[s.timeVal, { color: c.accentGlow }]}>{fmt(segMs)}</Text>
+            <Text style={s.timeLabel}>selected</Text>
+          </View>
+          <View style={{ alignItems: 'flex-end' }}>
+            <Text style={s.timeVal}>{fmt(trimEnd)}</Text>
+            <Text style={s.timeLabel}>end</Text>
+          </View>
+        </View>
 
-        {/* Confirm */}
+        {/* Buttons row */}
+        <View style={s.btnRow}>
+          <TouchableOpacity
+            style={[s.actionBtn, previewing && s.actionBtnActive]}
+            onPress={togglePreview}
+          >
+            <Text style={[s.actionBtnText, previewing && s.actionBtnTextActive]}>
+              {previewing ? '⏹  Stop' : '▶  Preview'}
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={s.actionBtn}
+            onPress={() => Alert.alert('Not Implemented', 'Auto-trim coming soon!')}
+          >
+            <Text style={s.actionBtnText}>✨  Auto-trim</Text>
+          </TouchableOpacity>
+        </View>
+
         <TouchableOpacity
-          style={styles.confirmButton}
-          onPress={() => onConfirm(trimStart, trimEnd)}
+          style={s.confirmBtn}
+          onPress={() => { stopPreview(); onConfirm(trimStart, trimEnd); }}
         >
-          <Text style={styles.confirmButtonText}>Use segment — Record →</Text>
+          <Text style={s.confirmBtnText}>Use segment — Record →</Text>
         </TouchableOpacity>
       </View>
     </SafeAreaView>
   );
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#111' },
+const s = StyleSheet.create({
+  screen: { flex: 1, backgroundColor: c.bg },
   header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: '#333',
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingHorizontal: 16, paddingVertical: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: c.border,
   },
-  backText: { color: '#fff', fontSize: 16, width: 60 },
-  headerTitle: { color: '#fff', fontSize: 17, fontWeight: '700' },
-  body: { flex: 1, paddingHorizontal: 24, paddingTop: 32, gap: 16 },
-  songName: { color: '#fff', fontSize: 17, fontWeight: '600' },
-  totalDuration: { color: '#888', fontSize: 13 },
-  timeRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  timeLabel: { color: '#fff', fontSize: 13, fontWeight: '600', width: 48 },
-  segmentDuration: { color: '#aaa', fontSize: 13 },
+  back: { color: c.textMuted, fontSize: 15, width: 60 },
+  headerTitle: { color: c.text, fontSize: 17, fontWeight: '700' },
+  body: { flex: 1, paddingHorizontal: 20, paddingTop: 24, gap: 22 },
+  songName: { color: c.text, fontSize: 16, fontWeight: '600', lineHeight: 22 },
+  totalDur:  { color: c.textDim, fontSize: 13, marginTop: -14 },
 
-  // Track
-  trackContainer: {
-    height: TRACK_H,
-    marginVertical: 8,
-    position: 'relative',
-    justifyContent: 'center',
+  waveOuter: { height: TRACK_H, position: 'relative', overflow: 'visible' },
+  barsRow: {
+    flexDirection: 'row', alignItems: 'center', height: TRACK_H,
+    gap: 2, borderRadius: 8, overflow: 'hidden',
   },
-  strip: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: '#444',
-    top: (TRACK_H - 6) / 2,
-  },
-  selectedRegion: {
-    position: 'absolute',
-    height: 6,
-    top: (TRACK_H - 6) / 2,
-    backgroundColor: '#e53e3e',
-    borderRadius: 3,
+  bar: { flex: 1, borderRadius: 2, minHeight: 3 },
+  barIn:  { backgroundColor: c.accent },
+  barOut: { backgroundColor: c.surface2 },
+  dim: {
+    position: 'absolute', top: 0, bottom: 0,
+    backgroundColor: 'rgba(8,6,18,0.6)', borderRadius: 8,
   },
   handle: {
-    position: 'absolute',
-    width: HANDLE_W,
-    height: TRACK_H,
-    top: 0,
-    alignItems: 'center',
-    justifyContent: 'center',
+    position: 'absolute', top: -8, bottom: -8,
+    width: HANDLE_W, alignItems: 'center', justifyContent: 'center', zIndex: 10,
   },
-  handleBar: {
-    width: HANDLE_W,
-    height: TRACK_H,
-    borderRadius: 4,
-    backgroundColor: '#fff',
-    opacity: 0.95,
+  handleLine: {
+    width: 2, height: TRACK_H + 16, backgroundColor: c.text, borderRadius: 2,
+    ...glow(c.text, 6),
+  },
+  knob: {
+    position: 'absolute', width: 12, height: 12, borderRadius: 6,
+    backgroundColor: c.text, ...glow(c.text, 8),
   },
 
-  // Buttons
-  autoTrimButton: {
-    alignSelf: 'flex-start',
-    borderWidth: 1,
-    borderColor: '#555',
-    paddingHorizontal: 18,
-    paddingVertical: 10,
-    borderRadius: 20,
+  timeRow: { flexDirection: 'row', justifyContent: 'space-between' },
+  timeVal:   { color: c.text, fontSize: 16, fontWeight: '700' },
+  timeLabel: { color: c.textDim, fontSize: 10, textTransform: 'uppercase', marginTop: 2 },
+
+  btnRow: { flexDirection: 'row', gap: 12 },
+  actionBtn: {
+    flex: 1, paddingVertical: 13, borderRadius: 50, alignItems: 'center',
+    backgroundColor: c.surface2, borderWidth: 1, borderColor: c.border,
   },
-  autoTrimText: { color: '#aaa', fontSize: 14 },
-  confirmButton: {
-    backgroundColor: '#e53e3e',
-    paddingVertical: 16,
-    borderRadius: 50,
-    alignItems: 'center',
-    marginTop: 8,
+  actionBtnActive: { backgroundColor: c.text, borderColor: c.text },
+  actionBtnText: { color: c.textMuted, fontSize: 14, fontWeight: '600' },
+  actionBtnTextActive: { color: c.bg },
+
+  confirmBtn: {
+    backgroundColor: c.accent, paddingVertical: 16,
+    borderRadius: 50, alignItems: 'center', ...glow(c.accent, 16),
   },
-  confirmButtonText: { color: '#fff', fontSize: 16, fontWeight: '700' },
+  confirmBtnText: { color: '#fff', fontSize: 16, fontWeight: '700' },
 });
