@@ -11,14 +11,12 @@ import {
 import { Video, ResizeMode, Audio, InterruptionModeIOS, InterruptionModeAndroid } from 'expo-av';
 import type { AVPlaybackStatusSuccess } from 'expo-av';
 import * as MediaLibrary from 'expo-media-library';
+import { stitchVideos } from '../modules/VideoStitcherModule';
 import type { AudioConfig, Clip } from '../App';
 
-type EditSegment = {
-  clipIndex: number;
-  durationMs: number;
-};
+type EditSegment = { clipIndex: number; durationMs: number };
 
-type Phase = 'loading' | 'ready' | 'playing' | 'done';
+type Phase = 'building' | 'stitching' | 'preview' | 'error';
 
 type Props = {
   clips: Clip[];
@@ -32,90 +30,55 @@ function buildPlan(clipCount: number, totalMs: number): EditSegment[] {
   while (filled < totalMs) {
     const remaining = totalMs - filled;
     const dur = Math.min(2000 + Math.random() * 3000, remaining);
-    segments.push({
-      clipIndex: Math.floor(Math.random() * clipCount),
-      durationMs: Math.round(dur),
-    });
+    segments.push({ clipIndex: Math.floor(Math.random() * clipCount), durationMs: Math.round(dur) });
     filled += dur;
   }
   return segments;
 }
 
 export function StitchScreen({ clips, audio, onBack }: Props) {
-  const totalMs = audio
-    ? audio.trimEndMs - audio.trimStartMs
-    : clips.length * 3000;
+  const totalMs = audio ? audio.trimEndMs - audio.trimStartMs : clips.length * 3000;
+  const plan = useRef<EditSegment[]>(buildPlan(clips.length, totalMs)).current;
 
-  const [plan] = useState<EditSegment[]>(() => buildPlan(clips.length, totalMs));
-  const [phase, setPhase] = useState<Phase>('loading');
-  const [segIdx, setSegIdx] = useState(0);
-  const [progress, setProgress] = useState(0);
+  const [phase, setPhase] = useState<Phase>('building');
+  const [outputUri, setOutputUri] = useState<string | null>(null);
+  const [errorMsg, setErrorMsg] = useState('');
   const [saving, setSaving] = useState(false);
-
+  const [isPlaying, setIsPlaying] = useState(false);
   const videoRef = useRef<Video>(null);
   const soundRef = useRef<Audio.Sound | null>(null);
-  const segTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Loading phase: fake 1.5s processing delay
   useEffect(() => {
-    const t = setTimeout(() => setPhase('ready'), 1500);
-    return () => clearTimeout(t);
+    runStitch();
+    return () => { soundRef.current?.unloadAsync(); };
   }, []);
 
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      segTimerRef.current && clearTimeout(segTimerRef.current);
-      soundRef.current?.unloadAsync();
-    };
-  }, []);
+  const runStitch = async () => {
+    setPhase('stitching');
+    try {
+      const segments = plan.map((seg) => ({
+        uri: clips[seg.clipIndex].videoUri,
+        durationMs: seg.durationMs,
+      }));
 
-  // Advance segment when segIdx changes and we are playing
-  useEffect(() => {
-    if (phase !== 'playing') return;
+      const uri = await stitchVideos(
+        segments,
+        audio?.uri ?? null,
+        audio?.trimStartMs ?? 0,
+        audio?.trimEndMs ?? 0,
+      );
 
-    if (segIdx >= plan.length) {
-      finishPlayback();
-      return;
+      setOutputUri(uri);
+      setPhase('preview');
+    } catch (e: any) {
+      setErrorMsg(e?.message ?? 'Unknown error');
+      setPhase('error');
     }
+  };
 
-    const seg = plan[segIdx];
-    const clip = clips[seg.clipIndex];
-    let cancelled = false;
+  const play = async () => {
+    if (!outputUri) return;
 
-    (async () => {
-      const video = videoRef.current;
-      if (!video) return;
-      await video.unloadAsync();
-      await video.loadAsync({ uri: clip.videoUri }, { shouldPlay: true });
-      if (cancelled) return;
-
-      segTimerRef.current = setTimeout(() => {
-        if (!cancelled) setSegIdx((p) => p + 1);
-      }, seg.durationMs);
-    })();
-
-    return () => {
-      cancelled = true;
-      segTimerRef.current && clearTimeout(segTimerRef.current);
-    };
-  }, [segIdx, phase]);
-
-  // Update progress bar from audio position
-  useEffect(() => {
-    if (phase !== 'playing' || !soundRef.current) return;
-    const sound = soundRef.current;
-    sound.setOnPlaybackStatusUpdate((s) => {
-      const st = s as AVPlaybackStatusSuccess;
-      if (!st.isLoaded) return;
-      const elapsed = st.positionMillis - (audio?.trimStartMs ?? 0);
-      setProgress(Math.min(elapsed / totalMs, 1));
-      if (st.didJustFinish) finishPlayback();
-    });
-    return () => { sound.setOnPlaybackStatusUpdate(null); };
-  }, [phase]);
-
-  const startPlayback = async () => {
     await Audio.setAudioModeAsync({
       allowsRecordingIOS: false,
       playsInSilentModeIOS: true,
@@ -123,41 +86,18 @@ export function StitchScreen({ clips, audio, onBack }: Props) {
       interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
     });
 
-    if (audio?.uri) {
-      const { sound } = await Audio.Sound.createAsync(
-        { uri: audio.uri },
-        { shouldPlay: false },
-      );
-      await sound.setPositionAsync(audio.trimStartMs);
-      soundRef.current = sound;
-      await sound.playAsync();
-    }
-
-    setSegIdx(0);
-    setPhase('playing');
+    await videoRef.current?.setPositionAsync(0);
+    await videoRef.current?.playAsync();
+    setIsPlaying(true);
   };
 
-  const finishPlayback = async () => {
-    segTimerRef.current && clearTimeout(segTimerRef.current);
+  const pause = async () => {
     await videoRef.current?.pauseAsync();
-    if (soundRef.current) {
-      await soundRef.current.stopAsync();
-      soundRef.current.setOnPlaybackStatusUpdate(null);
-    }
-    setPhase('done');
+    setIsPlaying(false);
   };
 
-  const replay = async () => {
-    if (soundRef.current) {
-      await soundRef.current.unloadAsync();
-      soundRef.current = null;
-    }
-    setProgress(0);
-    setSegIdx(0);
-    setPhase('ready');
-  };
-
-  const saveClips = async () => {
+  const saveToRoll = async () => {
+    if (!outputUri) return;
     setSaving(true);
     try {
       const { status } = await MediaLibrary.requestPermissionsAsync();
@@ -165,123 +105,115 @@ export function StitchScreen({ clips, audio, onBack }: Props) {
         Alert.alert('Permission denied', 'Camera roll access is required to save.');
         return;
       }
-      for (const clip of clips) {
-        await MediaLibrary.saveToLibraryAsync(clip.videoUri);
-      }
-      Alert.alert(
-        'Saved!',
-        `${clips.length} clip${clips.length !== 1 ? 's' : ''} saved to your Camera Roll.\n\nFull merged export coming with cloud processing.`,
-      );
+      await MediaLibrary.saveToLibraryAsync(outputUri.replace('file://', ''));
+      Alert.alert('Saved!', 'Stitched video saved to your Camera Roll.');
     } catch {
-      Alert.alert('Error', 'Could not save to camera roll.');
+      Alert.alert('Error', 'Could not save the video.');
     } finally {
       setSaving(false);
     }
   };
 
-  // ── Loading ───────────────────────────────────────────────────────
-  if (phase === 'loading') {
+  // ── Building plan ─────────────────────────────────────────────────
+  if (phase === 'building') {
     return (
       <View style={styles.center}>
         <ActivityIndicator size="large" color="#e53e3e" />
-        <Text style={styles.loadingText}>Assembling your video…</Text>
+        <Text style={styles.loadingText}>Planning edit…</Text>
+      </View>
+    );
+  }
+
+  // ── Stitching ─────────────────────────────────────────────────────
+  if (phase === 'stitching') {
+    return (
+      <View style={styles.center}>
+        <ActivityIndicator size="large" color="#e53e3e" />
+        <Text style={styles.loadingText}>Stitching {clips.length} clips…</Text>
         <Text style={styles.loadingSubtext}>
-          {clips.length} clips · {plan.length} cuts planned
+          {plan.length} cuts · {Math.round(totalMs / 1000)}s
         </Text>
       </View>
     );
   }
 
-  // ── Ready (show play button before starting) ──────────────────────
-  if (phase === 'ready') {
+  // ── Error ─────────────────────────────────────────────────────────
+  if (phase === 'error') {
     return (
       <SafeAreaView style={styles.center}>
-        <TouchableOpacity style={styles.backBtn} onPress={onBack}>
-          <Text style={styles.backText}>← Back</Text>
-        </TouchableOpacity>
-
-        <Text style={styles.readyEmoji}>🎬</Text>
-        <Text style={styles.readyTitle}>Ready to preview</Text>
-        <Text style={styles.readySubtext}>
-          {plan.length} cuts · {Math.round(totalMs / 1000)}s
-          {audio ? ` · ${audio.name}` : ''}
-        </Text>
-
-        <TouchableOpacity style={styles.playBtn} onPress={startPlayback}>
-          <Text style={styles.playBtnText}>▶  Play Preview</Text>
+        <Text style={styles.errorText}>Stitch failed</Text>
+        <Text style={styles.errorDetail}>{errorMsg}</Text>
+        <TouchableOpacity style={styles.ghostBtn} onPress={onBack}>
+          <Text style={styles.ghostBtnText}>← Back</Text>
         </TouchableOpacity>
       </SafeAreaView>
     );
   }
 
-  // ── Playing / Done — full-screen video ───────────────────────────
-  const currentClip = phase === 'playing' && segIdx < plan.length
-    ? clips[plan[segIdx].clipIndex]
-    : null;
-
+  // ── Preview player ────────────────────────────────────────────────
   return (
     <View style={styles.container}>
-      {/* Video — we keep it mounted and swap source via loadAsync */}
       <Video
         ref={videoRef}
-        source={currentClip ? { uri: currentClip.videoUri } : undefined}
+        source={{ uri: outputUri! }}
         style={styles.video}
-        resizeMode={ResizeMode.COVER}
-        isMuted
+        resizeMode={ResizeMode.CONTAIN}
         shouldPlay={false}
+        onPlaybackStatusUpdate={(s) => {
+          const st = s as AVPlaybackStatusSuccess;
+          if (st.isLoaded && st.didJustFinish) setIsPlaying(false);
+        }}
       />
 
-      {/* Done overlay */}
-      {phase === 'done' && (
-        <View style={styles.doneOverlay}>
-          <Text style={styles.doneTitle}>Done!</Text>
-          <Text style={styles.doneSubtext}>Your stitched preview is ready.</Text>
+      {/* Play / pause tap area */}
+      <TouchableOpacity
+        style={styles.playOverlay}
+        onPress={isPlaying ? pause : play}
+        activeOpacity={0.7}
+      >
+        {!isPlaying && <Text style={styles.playIcon}>▶</Text>}
+      </TouchableOpacity>
 
-          <TouchableOpacity style={styles.replayBtn} onPress={replay}>
-            <Text style={styles.replayBtnText}>↺  Replay</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.saveBtn, saving && styles.saveBtnDisabled]}
-            onPress={saveClips}
-            disabled={saving}
-          >
-            {saving
-              ? <ActivityIndicator color="#fff" />
-              : <Text style={styles.saveBtnText}>⬇  Save Clips to Camera Roll</Text>
-            }
-          </TouchableOpacity>
-
-          <Text style={styles.saveMeta}>
-            Merged single-file export coming with cloud processing
-          </Text>
-        </View>
-      )}
-
-      {/* Progress bar (playing only) */}
-      {phase === 'playing' && (
-        <View style={styles.progressWrap}>
-          <View style={styles.progressTrack}>
-            <View style={[styles.progressFill, { width: `${progress * 100}%` }]} />
-          </View>
-          <Text style={styles.progressLabel}>
-            {Math.round(progress * totalMs / 1000)}s / {Math.round(totalMs / 1000)}s
-          </Text>
-        </View>
-      )}
-
-      {/* Close button */}
+      {/* Top bar */}
       <SafeAreaView style={styles.topSafe}>
-        <TouchableOpacity style={styles.closeBtn} onPress={onBack}>
-          <Text style={styles.closeBtnText}>✕</Text>
-        </TouchableOpacity>
+        <View style={styles.topRow}>
+          <TouchableOpacity style={styles.iconBtn} onPress={onBack}>
+            <Text style={styles.iconBtnText}>✕</Text>
+          </TouchableOpacity>
+          <Text style={styles.topTitle}>Preview</Text>
+          <View style={{ width: 40 }} />
+        </View>
       </SafeAreaView>
+
+      {/* Bottom actions */}
+      <View style={styles.bottomBar}>
+        <Text style={styles.doneLabel}>
+          {plan.length} cuts · {Math.round(totalMs / 1000)}s
+          {audio ? ` · ${audio.name}` : ''}
+        </Text>
+
+        <TouchableOpacity
+          style={[styles.saveBtn, saving && styles.saveBtnDisabled]}
+          onPress={saveToRoll}
+          disabled={saving}
+        >
+          {saving
+            ? <ActivityIndicator color="#fff" />
+            : <Text style={styles.saveBtnText}>⬇  Save to Camera Roll</Text>
+          }
+        </TouchableOpacity>
+
+        <TouchableOpacity style={styles.retryBtn} onPress={runStitch}>
+          <Text style={styles.retryBtnText}>↺  Re-stitch with new random cuts</Text>
+        </TouchableOpacity>
+      </View>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#000' },
+  video: { flex: 1 },
   center: {
     flex: 1,
     alignItems: 'center',
@@ -290,92 +222,56 @@ const styles = StyleSheet.create({
     gap: 12,
     padding: 32,
   },
-  video: { flex: 1 },
-
-  // Loading
-  loadingText: { color: '#fff', fontSize: 18, fontWeight: '700', marginTop: 16 },
+  loadingText: { color: '#fff', fontSize: 18, fontWeight: '700' },
   loadingSubtext: { color: '#666', fontSize: 14 },
+  errorText: { color: '#e53e3e', fontSize: 22, fontWeight: '800' },
+  errorDetail: { color: '#888', fontSize: 13, textAlign: 'center' },
+  ghostBtn: { marginTop: 16, paddingVertical: 10 },
+  ghostBtnText: { color: '#888', fontSize: 15 },
 
-  // Ready
-  backBtn: { position: 'absolute', top: 16, left: 16 },
-  backText: { color: '#888', fontSize: 15 },
-  readyEmoji: { fontSize: 64, marginBottom: 4 },
-  readyTitle: { color: '#fff', fontSize: 24, fontWeight: '800' },
-  readySubtext: { color: '#888', fontSize: 14, textAlign: 'center' },
-  playBtn: {
-    marginTop: 16,
-    backgroundColor: '#e53e3e',
-    paddingHorizontal: 40,
-    paddingVertical: 16,
-    borderRadius: 50,
-  },
-  playBtnText: { color: '#fff', fontSize: 17, fontWeight: '700' },
-
-  // Progress
-  progressWrap: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    paddingBottom: 40,
-    paddingHorizontal: 24,
-    gap: 6,
-    backgroundColor: 'rgba(0,0,0,0.4)',
-    paddingTop: 12,
-  },
-  progressTrack: {
-    height: 3,
-    borderRadius: 2,
-    backgroundColor: 'rgba(255,255,255,0.25)',
-  },
-  progressFill: { height: 3, borderRadius: 2, backgroundColor: '#e53e3e' },
-  progressLabel: { color: 'rgba(255,255,255,0.6)', fontSize: 12 },
-
-  // Done overlay
-  doneOverlay: {
+  playOverlay: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0,0,0,0.82)',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 16,
-    padding: 32,
   },
-  doneTitle: { color: '#fff', fontSize: 32, fontWeight: '900' },
-  doneSubtext: { color: '#aaa', fontSize: 15, marginBottom: 8 },
-  replayBtn: {
-    borderWidth: 2,
-    borderColor: '#fff',
-    paddingHorizontal: 32,
-    paddingVertical: 14,
-    borderRadius: 50,
-    width: '100%',
+  playIcon: { fontSize: 72, color: 'rgba(255,255,255,0.85)' },
+
+  topSafe: { position: 'absolute', top: 0, left: 0, right: 0 },
+  topRow: {
+    flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingTop: 12,
   },
-  replayBtnText: { color: '#fff', fontSize: 16, fontWeight: '700' },
+  iconBtn: {
+    width: 40, height: 40, borderRadius: 20,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  iconBtnText: { color: '#fff', fontSize: 16 },
+  topTitle: { color: '#fff', fontSize: 16, fontWeight: '700' },
+
+  bottomBar: {
+    position: 'absolute',
+    bottom: 0, left: 0, right: 0,
+    backgroundColor: 'rgba(0,0,0,0.75)',
+    paddingHorizontal: 24,
+    paddingTop: 16,
+    paddingBottom: 40,
+    gap: 12,
+  },
+  doneLabel: { color: '#aaa', fontSize: 13 },
   saveBtn: {
     backgroundColor: '#e53e3e',
-    paddingHorizontal: 32,
     paddingVertical: 14,
     borderRadius: 50,
-    width: '100%',
     alignItems: 'center',
     minHeight: 50,
     justifyContent: 'center',
   },
   saveBtnDisabled: { opacity: 0.6 },
   saveBtnText: { color: '#fff', fontSize: 16, fontWeight: '700' },
-  saveMeta: { color: '#555', fontSize: 12, textAlign: 'center' },
-
-  // Close
-  topSafe: { position: 'absolute', top: 0, right: 0 },
-  closeBtn: {
-    margin: 16,
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(0,0,0,0.55)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  closeBtnText: { color: '#fff', fontSize: 16 },
+  retryBtn: { alignItems: 'center', paddingVertical: 6 },
+  retryBtnText: { color: '#666', fontSize: 13 },
 });
