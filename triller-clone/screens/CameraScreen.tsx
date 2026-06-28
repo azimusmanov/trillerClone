@@ -6,12 +6,9 @@ import { c, glow } from '../theme';
 import type { AudioConfig, Clip } from '../App';
 
 const MAX_CLIPS = 10;
-// Audio starts this many ms before trimStart so the camera encoder is running
-// by the time audio reaches the selected segment.
-// Tune this if still desynced: increase if video still lags, decrease if audio lags.
-// Audio starts this many ms before trimStart.
-// Must equal camera encoder startup time on your device (~300ms on most iPhones in preview mode).
-const LEAD_IN_MS = 300;
+const COUNTDOWN_S = 3;
+
+type RecordState = 'idle' | 'countdown' | 'recording';
 
 type Props = {
   audio: AudioConfig | null;
@@ -23,12 +20,14 @@ type Props = {
 };
 
 export function CameraScreen({ audio, clips, onClipRecorded, onChangeSong, onViewClips, onStitch }: Props) {
-  const [recording, setRecording] = useState(false);
-  const [facing, setFacing]       = useState<CameraType>('back');
-  const [elapsedMs, setElapsedMs] = useState(0);
-  const cameraRef = useRef<CameraView>(null);
-  const soundRef  = useRef<Audio.Sound | null>(null);
-  const timerRef  = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [recordState, setRecordState] = useState<RecordState>('idle');
+  const [countdown,   setCountdown]   = useState(COUNTDOWN_S);
+  const [facing,      setFacing]      = useState<CameraType>('back');
+  const [elapsedMs,   setElapsedMs]   = useState(0);
+  const cameraRef   = useRef<CameraView>(null);
+  const soundRef    = useRef<Audio.Sound | null>(null);
+  const timerRef    = useRef<ReturnType<typeof setInterval> | null>(null);
+  const cancelRef   = useRef(false);
 
   const segmentMs = audio ? audio.trimEndMs - audio.trimStartMs : null;
 
@@ -37,12 +36,22 @@ export function CameraScreen({ audio, clips, onClipRecorded, onChangeSong, onVie
     soundRef.current?.unloadAsync();
   }, []);
 
-  const startRecording = async () => {
+  const cleanupSound = async () => {
+    if (soundRef.current) {
+      await soundRef.current.stopAsync().catch(() => {});
+      await soundRef.current.unloadAsync().catch(() => {});
+      soundRef.current = null;
+    }
+  };
+
+  const beginCountdownAndRecord = async () => {
     if (clips.length >= MAX_CLIPS) {
       Alert.alert('Clip Limit', `Max ${MAX_CLIPS} clips. Delete some to record more.`);
       return;
     }
     if (!cameraRef.current) return;
+
+    cancelRef.current = false;
 
     await Audio.setAudioModeAsync({
       allowsRecordingIOS: true,
@@ -51,40 +60,51 @@ export function CameraScreen({ audio, clips, onClipRecorded, onChangeSong, onVie
       interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
     });
 
-    // Start audio LEAD_IN_MS before trimStart so by the time the camera encoder
-    // finishes starting up (~150ms), audio has reached trimStartMs.
-    // No compensation needed in playback or stitch — this is the only adjustment.
+    // Load audio and seek to COUNTDOWN_S seconds before trimStart
+    // so audio reaches trimStart exactly when recording fires
     if (audio?.uri) {
       const { sound } = await Audio.Sound.createAsync({ uri: audio.uri }, { shouldPlay: false });
-      const leadInStart = Math.max(0, audio.trimStartMs - LEAD_IN_MS);
-      await sound.setPositionAsync(leadInStart);
+      const audioStartPos = Math.max(0, audio.trimStartMs - COUNTDOWN_S * 1000);
+      await sound.setPositionAsync(audioStartPos);
       soundRef.current = sound;
+      await sound.playAsync();
     }
 
+    // — Countdown —
+    setCountdown(COUNTDOWN_S);
+    setRecordState('countdown');
+
+    for (let i = COUNTDOWN_S - 1; i >= 0; i--) {
+      await new Promise<void>(r => setTimeout(r, 1000));
+      if (cancelRef.current) return;
+      setCountdown(i);
+    }
+
+    if (cancelRef.current) return;
+
+    // — GO — camera is warm, audio is at trimStart —
     setElapsedMs(0);
-    setRecording(true);
+    setRecordState('recording');
     timerRef.current = setInterval(() => setElapsedMs(p => p + 100), 100);
 
     try {
-      const recordingPromise = cameraRef.current.recordAsync({
+      const result = await cameraRef.current.recordAsync({
         maxDuration: segmentMs ? segmentMs / 1000 : undefined,
       });
-      // Fire audio simultaneously — it starts LEAD_IN_MS before trimStart
-      await soundRef.current?.playAsync();
-
-      const result = await recordingPromise;
       if (result?.uri) onClipRecorded(result.uri);
     } finally {
       timerRef.current && clearInterval(timerRef.current);
       timerRef.current = null;
-      if (soundRef.current) {
-        await soundRef.current.stopAsync();
-        await soundRef.current.unloadAsync();
-        soundRef.current = null;
-      }
-      setRecording(false);
+      await cleanupSound();
+      setRecordState('idle');
       setElapsedMs(0);
     }
+  };
+
+  const cancelCountdown = async () => {
+    cancelRef.current = true;
+    await cleanupSound();
+    setRecordState('idle');
   };
 
   const stopRecording = () => cameraRef.current?.stopRecording();
@@ -101,65 +121,102 @@ export function CameraScreen({ audio, clips, onClipRecorded, onChangeSong, onVie
     <View style={s.container}>
       <CameraView ref={cameraRef} style={s.camera} mode="video" facing={facing} />
 
-      {/* Vignette overlay */}
-      <View style={s.vignette} pointerEvents="none" />
-
       {/* Top bar */}
       <View style={s.topBar}>
-        <TouchableOpacity style={s.iconBtn} onPress={flipCamera} disabled={recording}>
+        <TouchableOpacity
+          style={s.iconBtn}
+          onPress={flipCamera}
+          disabled={recordState !== 'idle'}
+        >
           <Text style={s.iconBtnText}>⟳</Text>
         </TouchableOpacity>
         <View style={s.topRight}>
-          <TouchableOpacity style={s.chip} onPress={onChangeSong} disabled={recording}>
+          <TouchableOpacity
+            style={s.chip}
+            onPress={onChangeSong}
+            disabled={recordState !== 'idle'}
+          >
             <Text style={s.chipText} numberOfLines={1}>
               {audio ? `♪ ${audio.name}` : '+ Add song'}
             </Text>
           </TouchableOpacity>
           {clips.length > 0 && (
-            <TouchableOpacity style={s.chip} onPress={onViewClips}>
+            <TouchableOpacity style={s.chip} onPress={onViewClips} disabled={recordState !== 'idle'}>
               <Text style={s.chipText}>Clips {clips.length}/{MAX_CLIPS}</Text>
             </TouchableOpacity>
           )}
         </View>
       </View>
 
-      {/* Progress bar */}
-      {recording && segmentMs && (
+      {/* Progress bar while recording */}
+      {recordState === 'recording' && segmentMs && (
         <View style={s.progressTrack}>
           <View style={[s.progressFill, { width: `${pct * 100}%` }]} />
         </View>
       )}
 
+      {/* Countdown overlay */}
+      {recordState === 'countdown' && (
+        <View style={s.countdownOverlay} pointerEvents="box-none">
+          <Text style={s.countdownNumber}>
+            {countdown === 0 ? 'GO' : countdown}
+          </Text>
+          <Text style={s.countdownSub}>
+            {audio ? 'Listen for the beat' : 'Get ready'}
+          </Text>
+        </View>
+      )}
+
       {/* Bottom controls */}
       <View style={s.bottomControls}>
-        {recording && (
+        {recordState === 'recording' && (
           <Text style={s.timer}>
             {fmt(elapsedMs)}{segmentMs ? ` / ${fmt(segmentMs)}` : ''}
           </Text>
         )}
 
         <View style={s.btnRow}>
-          {clips.length > 0 && !recording && (
+          {/* Stitch button */}
+          {clips.length > 0 && recordState === 'idle' && (
             <TouchableOpacity style={s.stitchBtn} onPress={onStitch}>
               <Text style={s.stitchIcon}>✂</Text>
               <Text style={s.stitchLabel}>Stitch</Text>
             </TouchableOpacity>
           )}
 
-          <TouchableOpacity
-            style={[s.recordRing, recording && s.recordRingActive]}
-            onPress={recording ? stopRecording : startRecording}
-            activeOpacity={0.85}
-          >
-            <View style={[s.recordDot, recording && s.recordDotStop]} />
-          </TouchableOpacity>
+          {/* Main record / stop / cancel button */}
+          {recordState === 'idle' && (
+            <TouchableOpacity
+              style={s.recordRing}
+              onPress={beginCountdownAndRecord}
+              activeOpacity={0.85}
+            >
+              <View style={s.recordDot} />
+            </TouchableOpacity>
+          )}
 
-          {clips.length > 0 && !recording && <View style={{ width: 56 }} />}
+          {recordState === 'countdown' && (
+            <TouchableOpacity style={s.cancelBtn} onPress={cancelCountdown}>
+              <Text style={s.cancelText}>Cancel</Text>
+            </TouchableOpacity>
+          )}
+
+          {recordState === 'recording' && (
+            <TouchableOpacity
+              style={[s.recordRing, s.recordRingActive]}
+              onPress={stopRecording}
+              activeOpacity={0.85}
+            >
+              <View style={[s.recordDot, s.recordDotStop]} />
+            </TouchableOpacity>
+          )}
+
+          {clips.length > 0 && recordState === 'idle' && <View style={{ width: 56 }} />}
         </View>
 
-        {!recording && (
+        {recordState === 'idle' && (
           <Text style={s.hint}>
-            {segmentMs ? `Max ${fmt(segmentMs)} per clip` : 'Tap to record'}
+            {segmentMs ? `${COUNTDOWN_S}s countdown · max ${fmt(segmentMs)}` : `${COUNTDOWN_S}s countdown · tap to start`}
           </Text>
         )}
       </View>
@@ -170,16 +227,6 @@ export function CameraScreen({ audio, clips, onClipRecorded, onChangeSong, onVie
 const s = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#000' },
   camera: { flex: 1 },
-  vignette: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'transparent',
-    borderWidth: 0,
-    // dark edge vignette
-    shadowColor: '#000',
-    shadowRadius: 80,
-    shadowOpacity: 1,
-    shadowOffset: { width: 0, height: 0 },
-  },
 
   topBar: {
     position: 'absolute', top: 56, left: 16, right: 16,
@@ -205,6 +252,25 @@ const s = StyleSheet.create({
   },
   progressFill: { height: 2, borderRadius: 2, backgroundColor: c.accent, ...glow(c.accent, 8) },
 
+  // Countdown
+  countdownOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(8,6,18,0.45)',
+  },
+  countdownNumber: {
+    fontSize: 120,
+    fontWeight: '900',
+    color: c.text,
+    ...glow(c.text, 30),
+  },
+  countdownSub: {
+    color: c.textMuted,
+    fontSize: 16,
+    marginTop: -8,
+  },
+
   bottomControls: {
     position: 'absolute', bottom: 48, width: '100%', alignItems: 'center', gap: 14,
   },
@@ -218,8 +284,18 @@ const s = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
   },
   recordRingActive: { borderColor: c.record, ...glow(c.record, 20) },
-  recordDot: { width: 54, height: 54, borderRadius: 27, backgroundColor: c.record, ...glow(c.record, 16) },
+  recordDot: {
+    width: 54, height: 54, borderRadius: 27,
+    backgroundColor: c.record, ...glow(c.record, 16),
+  },
   recordDotStop: { width: 26, height: 26, borderRadius: 5 },
+
+  cancelBtn: {
+    paddingHorizontal: 32, paddingVertical: 18,
+    borderRadius: 50, borderWidth: 1.5, borderColor: c.textMuted,
+    backgroundColor: 'rgba(8,6,18,0.6)',
+  },
+  cancelText: { color: c.textMuted, fontSize: 15, fontWeight: '600' },
 
   stitchBtn: {
     width: 56, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center',
