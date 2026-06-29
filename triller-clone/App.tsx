@@ -17,7 +17,8 @@ export type AudioConfig = {
 };
 
 export type Clip = {
-  videoUri: string;
+  videoUri: string;          // original silent video — used for stitch
+  previewUri: string | null; // video with audio baked in — used for playback
   audioConfig: AudioConfig | null;
 };
 
@@ -93,7 +94,7 @@ export default function App() {
         <CameraScreen
           audio={audio}
           clips={clips}
-          onClipRecorded={(videoUri) => setClips(prev => [...prev, { videoUri, audioConfig: audio }])}
+          onClipRecorded={(videoUri, previewUri) => setClips(prev => [...prev, { videoUri, previewUri, audioConfig: audio }])}
           onChangeSong={() => setScreen('picker')}
           onViewClips={() => setScreen('clips')}
           onStitch={() => setScreen('stitch')}

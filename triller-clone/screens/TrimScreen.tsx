@@ -58,11 +58,18 @@ export function TrimScreen({ audio, onConfirm, onBack }: Props) {
     setPreviewing(false);
   };
 
+  // Reset the auto-stop timer whenever trim bounds change while previewing
+  const resetPreviewTimer = () => {
+    if (!soundRef.current) return;
+    timerRef.current && clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(stopPreview, teRef.current - tsRef.current);
+  };
+
   const startPan = useRef(PanResponder.create({
     onStartShouldSetPanResponder: () => true,
     onMoveShouldSetPanResponder:  () => true,
     onPanResponderGrant: () => {
-      stopPreview(); // stop audio when user grabs a handle
+      // Do NOT stop preview — seek to current start position instead
       sBase.current = (tsRef.current / durationMs) * twRef.current;
     },
     onPanResponderMove: (_, g) => {
@@ -71,6 +78,9 @@ export function TrimScreen({ audio, onConfirm, onBack }: Props) {
       const newX = Math.max(0, Math.min(sBase.current + g.dx, maxX));
       tsRef.current = (newX / tw) * durationMs;
       setTrimStart(tsRef.current);
+      // Live seek audio to new start position while dragging
+      soundRef.current?.setPositionAsync(tsRef.current).catch(() => {});
+      resetPreviewTimer();
     },
   })).current;
 
@@ -78,7 +88,7 @@ export function TrimScreen({ audio, onConfirm, onBack }: Props) {
     onStartShouldSetPanResponder: () => true,
     onMoveShouldSetPanResponder:  () => true,
     onPanResponderGrant: () => {
-      stopPreview();
+      // Do NOT stop preview while adjusting end point
       eBase.current = (teRef.current / durationMs) * twRef.current;
     },
     onPanResponderMove: (_, g) => {
@@ -87,6 +97,8 @@ export function TrimScreen({ audio, onConfirm, onBack }: Props) {
       const newX = Math.max(minX, Math.min(eBase.current + g.dx, tw));
       teRef.current = (newX / tw) * durationMs;
       setTrimEnd(teRef.current);
+      // Update auto-stop timer when end point moves
+      resetPreviewTimer();
     },
   })).current;
 
