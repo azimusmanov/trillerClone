@@ -104,7 +104,6 @@ export function CameraScreen({ audio, clips, onClipRecorded, onChangeSong, onVie
     let previewUri: string | null = null;
     if (audio?.uri) {
       try {
-        // Reuse stitch with one segment to bake audio into clip — avoids JS sync issues on playback
         previewUri = await stitchVideos(
           [{ uri: videoUri, startMs: 0, durationMs: 999_000 }],
           audio.uri,
